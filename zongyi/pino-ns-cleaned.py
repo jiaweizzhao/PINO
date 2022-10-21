@@ -66,14 +66,14 @@ class SpectralConv3d(nn.Module):
         
         # Multiply relevant Fourier modes
         out_ft = torch.zeros(batchsize, self.out_channels, x.size(2), x.size(3), x.size(4)//2 + 1, device=x.device, dtype=torch.cfloat)
-        out_ft[:, :, :self.modes1, :self.modes2, :self.modes3] = \
-            compl_mul3d(x_ft[:, :, :self.modes1, :self.modes2, :self.modes3], self.weights1[:,:,:self.adaptive_modes1, :self.adaptive_modes2, :self.adaptive_modes3])
-        out_ft[:, :, -self.modes1:, :self.modes2, :self.modes3] = \
-            compl_mul3d(x_ft[:, :, -self.modes1:, :self.modes2, :self.modes3], self.weights2[:,:,:self.adaptive_modes1, :self.adaptive_modes2, :self.adaptive_modes3])
-        out_ft[:, :, :self.modes1, -self.modes2:, :self.modes3] = \
-            compl_mul3d(x_ft[:, :, :self.modes1, -self.modes2:, :self.modes3], self.weights3[:,:,:self.adaptive_modes1, :self.adaptive_modes2, :self.adaptive_modes3])
-        out_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3] = \
-            compl_mul3d(x_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3], self.weights4[:,:,:self.adaptive_modes1, :self.adaptive_modes2, :self.adaptive_modes3])
+        out_ft[:, :, :self.adaptive_modes1, :self.adaptive_modes2, :self.adaptive_modes3] = \
+            compl_mul3d(x_ft[:, :, :self.adaptive_modes1, :self.adaptive_modes2, :self.adaptive_modes3], self.weights1[:,:,:self.adaptive_modes1, :self.adaptive_modes2, :self.adaptive_modes3])
+        out_ft[:, :, -self.adaptive_modes1:, :self.adaptive_modes2, :self.adaptive_modes3] = \
+            compl_mul3d(x_ft[:, :, -self.adaptive_modes1:, :self.adaptive_modes2, :self.adaptive_modes3], self.weights2[:,:,:self.adaptive_modes1, :self.adaptive_modes2, :self.adaptive_modes3])
+        out_ft[:, :, :self.adaptive_modes1, -self.adaptive_modes2:, :self.adaptive_modes3] = \
+            compl_mul3d(x_ft[:, :, :self.adaptive_modes1, -self.adaptive_modes2:, :self.adaptive_modes3], self.weights3[:,:,:self.adaptive_modes1, :self.adaptive_modes2, :self.adaptive_modes3])
+        out_ft[:, :, -self.adaptive_modes1:, -self.adaptive_modes2:, :self.adaptive_modes3] = \
+            compl_mul3d(x_ft[:, :, -self.adaptive_modes1:, -self.adaptive_modes2:, :self.adaptive_modes3], self.weights4[:,:,:self.adaptive_modes1, :self.adaptive_modes2, :self.adaptive_modes3])
 
         #Return to physical space
         x = torch.fft.irfftn(out_ft, s=(x.size(2), x.size(3), x.size(4)), dim=[2,3,4], norm="ortho")
@@ -104,8 +104,8 @@ class SpectralConv3d(nn.Module):
             
             
         # log mode changes
-        print('modes1: {}, modes2: {}, modes3: {}'.format(self.modes1, self.modes2, self.modes3))
-        wandb.log({'modes1': self.modes1, 'modes2': self.modes2, 'modes3': self.modes3, 'epoch': ep})
+        print('modes1: {}, modes2: {}, modes3: {}'.format(self.adaptive_modes1, self.adaptive_modes2, self.adaptive_modes3))
+        wandb.log({'modes1': self.adaptive_modes1, 'modes2': self.adaptive_modes2, 'modes3': self.adaptive_modes3, 'epoch': ep})
         
     
 
