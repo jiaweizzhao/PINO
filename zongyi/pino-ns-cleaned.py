@@ -15,8 +15,21 @@ import scipy.io
 
 import wandb
 
-run_name = 'incremental_loss_gap'
-wandb.init(project="incremental-fno", entity="jiawei", name=run_name)
+import argparse
+parser = argparse.ArgumentParser(description='Incremental PINO')
+
+parser.add_argument('--name', type=str, default='test')
+parser.add_argument('--method', type=str, default='standard')
+parser.add_argument('--max_modes', default=8, type=int)
+parser.add_argument('--init_modes', default=1, type=int)
+
+# for loss gap method
+parser.add_argument('--loss_eps', default=1e-5, type=float)
+
+args = parser.parse_args()
+
+wandb.init(project="incremental-fno", entity="jiawei", name=args.name)
+wandb.config.update(args)
 
 torch.manual_seed(0)
 np.random.seed(0)
@@ -54,10 +67,9 @@ class SpectralConv3d(nn.Module):
         self.weights4 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, dtype=torch.cfloat))
         
         # reassign the modes
-        self.init_modes = 2
-        self.adaptive_modes1 = self.init_modes  #Number of Fourier modes to multiply, at most floor(N/2) + 1
-        self.adaptive_modes2 = self.init_modes 
-        self.adaptive_modes3 = self.init_modes 
+        self.adaptive_modes1 = args.init_modes  #Number of Fourier modes to multiply, at most floor(N/2) + 1
+        self.adaptive_modes2 = args.init_modes 
+        self.adaptive_modes3 = args.init_modes 
 
     def forward(self, x):
         batchsize = x.shape[0]
@@ -80,10 +92,12 @@ class SpectralConv3d(nn.Module):
         return x
     
     def determine_modes(self, ep, loss):
-        modes_list = [0,0,0]
-        method = 'loss_gap'
         
-        if method == 'loss_gap':
+        if args.method == 'standard':
+            self.adaptive_modes1 = self.max_modes
+            self.adaptive_modes2 = self.max_modes
+            self.adaptive_modes3 = self.max_modes
+        elif args.method == 'loss_gap':
             eps = 1e-5
             # method 1: loss_gap
             if not hasattr(self, 'loss_list'):
@@ -99,12 +113,12 @@ class SpectralConv3d(nn.Module):
                         self.adaptive_modes2 += 1
                     if self.adaptive_modes3 < self.max_modes:
                         self.adaptive_modes3 += 1
-        elif method == 'frequency_norm':
+        elif args.method == 'frequency_norm':
             pass
             
             
         # log mode changes
-        print('modes1: {}, modes2: {}, modes3: {}'.format(self.adaptive_modes1, self.adaptive_modes2, self.adaptive_modes3))
+        # print('modes1: {}, modes2: {}, modes3: {}'.format(self.adaptive_modes1, self.adaptive_modes2, self.adaptive_modes3))
         wandb.log({'modes1': self.adaptive_modes1, 'modes2': self.adaptive_modes2, 'modes3': self.adaptive_modes3, 'epoch': ep})
         
     
@@ -186,6 +200,12 @@ class Net2d(nn.Module):
             c += reduce(operator.mul, list(p.size()))
 
         return c
+    
+    def determine_modes(self, ep, loss):
+        self.conv1.conv0.determine_modes(ep, loss)
+        self.conv1.conv1.determine_modes(ep, loss)
+        self.conv1.conv2.determine_modes(ep, loss)
+        self.conv1.conv3.determine_modes(ep, loss)
 
 def get_forcing(S):
     x1 = torch.tensor(np.linspace(0, 2*np.pi, S+1)[:-1], dtype=torch.float).reshape(S, 1).repeat(1, S)
@@ -316,7 +336,7 @@ forcing_test = get_forcing(ns)
 myloss = LpLoss(size_average=True)
 error = np.zeros((epochs, 4))
 
-model = Net2d(modes, width).cuda()
+model = Net2d(args.max_modes, width).cuda()
 
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step, gamma=scheduler_gamma)
@@ -361,11 +381,8 @@ for ep in range(epochs):
     t2 = default_timer()
     print(ep, t2-t1, test_pino, loss_ic, test_f, test_l2, test_l2_T) #test_l2_u)
     wandb.log({'test_pino': test_pino, 'loss_ic': loss_ic, 'loss_f': test_f, 'loss_l2': test_l2, 'loss_l2_T': test_l2_T,'epoch': ep})
-    
-    model.conv1.conv0.determine_modes(ep, test_l2)
-    model.conv1.conv1.determine_modes(ep, test_l2)
-    model.conv1.conv2.determine_modes(ep, test_l2)
-    model.conv1.conv3.determine_modes(ep, test_l2)
+
+    model.determine_modes(ep, test_l2)
 
     # if ep % 1000 == 1:
     #     y = y[0,:,:,:].cpu().numpy()
