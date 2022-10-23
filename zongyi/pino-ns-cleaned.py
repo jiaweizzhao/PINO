@@ -26,6 +26,9 @@ parser.add_argument('--init_modes', default=1, type=int)
 # for loss gap method
 parser.add_argument('--loss_eps', default=1e-5, type=float)
 
+# for frequency_norm_abs method
+parser.add_argument('--norm_abs_eps', default=1.0, type=float)
+
 args = parser.parse_args()
 
 wandb.init(project="incremental-fno", entity="jiawei", name=args.name)
@@ -91,7 +94,7 @@ class SpectralConv3d(nn.Module):
         x = torch.fft.irfftn(out_ft, s=(x.size(2), x.size(3), x.size(4)), dim=[2,3,4], norm="ortho")
         return x
     
-    def determine_modes(self, ep, loss):
+    def determine_modes(self, ep, loss, layer_name=None):
         
         if args.method == 'standard':
             self.adaptive_modes1 = self.max_modes
@@ -113,13 +116,41 @@ class SpectralConv3d(nn.Module):
                         self.adaptive_modes2 += 1
                     if self.adaptive_modes3 < self.max_modes:
                         self.adaptive_modes3 += 1
-        elif args.method == 'frequency_norm':
-            pass
+        elif args.method == 'frequency_norm_abs':
+            # using the absolute frequency norm at each mode (after weight update) to determine whether to increase
+            
+            # caculate the frequency norm
+            weight_list = [self.weights1] #, self.weights2, self.weights3, self.weights4] #! temp version: onlt use first weight to determine
+            for parameters in weight_list:
+                weights = parameters.data
+                # only compute the highest representable frequency mode
+                # first mode direction
+                strength = torch.norm(weights[:,:,self.adaptive_modes1-1,:,:], p='fro') # will be removed in the future, see documetation
+                if strength >= args.norm_abs_eps:
+                    if self.adaptive_modes1 < self.max_modes:
+                        self.adaptive_modes1 += 1
+                        print('increase mode 1')
+                
+                # second mode direction
+                strength = torch.norm(weights[:,:,:,self.adaptive_modes2-1,:], p='fro') # will be removed in the future, see documetation
+                if strength >= args.norm_abs_eps:
+                    if self.adaptive_modes2 < self.max_modes:
+                        self.adaptive_modes2 += 1  
+                        print('increase mode 2')
+                        
+
+                # third mode direction
+                strength = torch.norm(weights[:,:,:,:,self.adaptive_modes3-1], p='fro') # will be removed in the future, see documetation
+                if strength >= args.norm_abs_eps:
+                    if self.adaptive_modes3 < self.max_modes:
+                        self.adaptive_modes3 += 1  
+                        print('increase mode 3')
+    
             
             
         # log mode changes
         # print('modes1: {}, modes2: {}, modes3: {}'.format(self.adaptive_modes1, self.adaptive_modes2, self.adaptive_modes3))
-        wandb.log({'modes1': self.adaptive_modes1, 'modes2': self.adaptive_modes2, 'modes3': self.adaptive_modes3, 'epoch': ep})
+        wandb.log({layer_name+'/modes1': self.adaptive_modes1, layer_name+'/modes2': self.adaptive_modes2, layer_name+'/modes3': self.adaptive_modes3, 'epoch': ep})
         
     
 
@@ -202,10 +233,10 @@ class Net2d(nn.Module):
         return c
     
     def determine_modes(self, ep, loss):
-        self.conv1.conv0.determine_modes(ep, loss)
-        self.conv1.conv1.determine_modes(ep, loss)
-        self.conv1.conv2.determine_modes(ep, loss)
-        self.conv1.conv3.determine_modes(ep, loss)
+        self.conv1.conv0.determine_modes(ep, loss, 'conv0')
+        self.conv1.conv1.determine_modes(ep, loss, 'conv1')
+        self.conv1.conv2.determine_modes(ep, loss, 'conv2')
+        self.conv1.conv3.determine_modes(ep, loss, 'conv3')
 
 def get_forcing(S):
     x1 = torch.tensor(np.linspace(0, 2*np.pi, S+1)[:-1], dtype=torch.float).reshape(S, 1).repeat(1, S)
