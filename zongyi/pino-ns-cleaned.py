@@ -98,7 +98,7 @@ class SpectralConv3d(nn.Module):
             self.adaptive_modes2 = self.max_modes
             self.adaptive_modes3 = self.max_modes
         elif args.method == 'loss_gap':
-            eps = 1e-5
+            eps = args.loss_eps
             # method 1: loss_gap
             if not hasattr(self, 'loss_list'):
                 self.loss_list = [loss]
@@ -382,7 +382,7 @@ for ep in range(epochs):
     print(ep, t2-t1, test_pino, loss_ic, test_f, test_l2, test_l2_T) #test_l2_u)
     wandb.log({'test_pino': test_pino, 'loss_ic': loss_ic, 'loss_f': test_f, 'loss_l2': test_l2, 'loss_l2_T': test_l2_T,'epoch': ep})
 
-    model.determine_modes(ep, test_l2)
+    model.determine_modes(ep, test_l2_T)
 
     # if ep % 1000 == 1:
     #     y = y[0,:,:,:].cpu().numpy()
