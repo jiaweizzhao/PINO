@@ -29,6 +29,11 @@ parser.add_argument('--loss_eps', default=1e-5, type=float)
 # for frequency_norm_abs method
 parser.add_argument('--norm_abs_eps', default=1.0, type=float)
 
+# for grad_frequency_explain
+parser.add_argument('--grad_max_iter', default=10, type=int)
+parser.add_argument('--grad_explained_ratio_threshold', default=0.9, type=float)
+parser.add_argument('--buffer', default=5, type=int)
+
 # visualization
 parser.add_argument('--visualize_evolution', action='store_true')
 
@@ -41,6 +46,12 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 activation = F.relu
+
+# tools box
+def compute_explained_variance(frequency_max, s):
+    s_current = s.clone()
+    s_current[frequency_max:] = 0
+    return 1 - torch.var(s - s_current) / torch.var(s)
 
 
 def compl_mul3d(a, b):
@@ -148,8 +159,67 @@ class SpectralConv3d(nn.Module):
                     if self.adaptive_modes3 < self.max_modes:
                         self.adaptive_modes3 += 1  
                         print('increase mode 3')
+        
+        elif args.method == 'grad_frequency_explain':                
+            # method 2: explain an averaged gradient distribution more than a threshold given the current modes
+            
+            # average the gradient over a certain period
+            if not hasattr(self, 'accumulated_grad'):
+                self.accumulated_grad = torch.zeros_like(self.weights1.grad.data)
+            if not hasattr(self, 'grad_iter'):
+                self.grad_iter = 1
+            
+            if self.grad_iter <= args.grad_max_iter:
+                self.grad_iter += 1
+                self.accumulated_grad += self.weights1.grad.data
+            
+            # compute and add modes given explained variance
+            else:
+                # for mode 1
+                weights = self.accumulated_grad
+                strength_vector = []
+                for mode_index in range(self.adaptive_modes1):
+                    strength = torch.norm(weights[:,:,mode_index,:,:], p='fro').cpu()
+                    strength_vector.append(strength)
+                expained_ratio = compute_explained_variance(self.adaptive_modes1 - args.buffer, torch.Tensor(strength_vector))
+                wandb.log({layer_name+'/modes1_expained_ratio': expained_ratio})
+                if expained_ratio < args.grad_explained_ratio_threshold:
+                    if self.adaptive_modes1 < self.max_modes:
+                        self.adaptive_modes1 += 1
+                        print('increase mode 1')
+
+                # for mode 2
+                weights = self.accumulated_grad
+                strength_vector = []
+                for mode_index in range(self.adaptive_modes2):
+                    strength = torch.norm(weights[:,:,mode_index,:,:], p='fro').cpu()
+                    strength_vector.append(strength)
+                expained_ratio = compute_explained_variance(self.adaptive_modes2 - args.buffer, torch.Tensor(strength_vector))
+                wandb.log({layer_name+'/modes2_expained_ratio': expained_ratio})
+                if expained_ratio < args.grad_explained_ratio_threshold:
+                    if self.adaptive_modes2 < self.max_modes:
+                        self.adaptive_modes2 += 1
+                        print('increase mode 2')
                         
-                # method 2: 
+                # for mode 3
+                weights = self.accumulated_grad
+                strength_vector = []
+                for mode_index in range(self.adaptive_modes3):
+                    strength = torch.norm(weights[:,:,mode_index,:,:], p='fro').cpu()
+                    strength_vector.append(strength)
+                expained_ratio = compute_explained_variance(self.adaptive_modes3 - args.buffer, torch.Tensor(strength_vector))
+                wandb.log({layer_name+'/modes3_expained_ratio': expained_ratio})
+                if expained_ratio < args.grad_explained_ratio_threshold:
+                    if self.adaptive_modes3 < self.max_modes:
+                        self.adaptive_modes3 += 1
+                        print('increase mode 3')
+                
+                # reset
+                self.grad_iter = 1
+                self.accumulated_grad = torch.zeros_like(self.weights1.grad.data)
+                
+            
+                
                 
         if args.visualize_evolution:
             # visualize evolution for all modes in modes1 in weights1 in each layer
