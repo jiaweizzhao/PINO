@@ -161,8 +161,56 @@ class SpectralConv3d(nn.Module):
                 else:
                     strength_list.append(strength)
             wandb.log({layer_name+'/modes1_evolution': wandb.Histogram(np.array(strength_list))})
-    
             
+            # visualize gradient 
+            weights = self.weights1.grad.data
+            for mode_index in range(self.max_modes):
+                strength = torch.norm(weights[:,:,mode_index,:,:], p='fro').cpu()
+                if mode_index == 0:
+                    strength_list = [strength]
+                else:
+                    strength_list.append(strength)
+            wandb.log({layer_name+'/modes1_grad_evolution': wandb.Histogram(np.array(strength_list))})            
+    
+            # visualize evolution for all modes in modes2 in weights1 in each layer
+            weights = self.weights1.data
+            for mode_index in range(self.max_modes):
+                strength = torch.norm(weights[:,:,:,mode_index,:], p='fro').cpu()
+                if mode_index == 0:
+                    strength_list = [strength]
+                else:
+                    strength_list.append(strength)
+            wandb.log({layer_name+'/modes2_evolution': wandb.Histogram(np.array(strength_list))})
+            
+            # visualize gradient
+            weights = self.weights1.grad.data
+            for mode_index in range(self.max_modes):
+                strength = torch.norm(weights[:,:,:,mode_index,:], p='fro').cpu()
+                if mode_index == 0:
+                    strength_list = [strength]
+                else:
+                    strength_list.append(strength)
+            wandb.log({layer_name+'/modes2_grad_evolution': wandb.Histogram(np.array(strength_list))})
+            
+            # visualize evolution for all modes in modes3 in weights1 in each layer
+            weights = self.weights1.data
+            for mode_index in range(self.max_modes):
+                strength = torch.norm(weights[:,:,:,:,mode_index], p='fro').cpu()
+                if mode_index == 0:
+                    strength_list = [strength]
+                else:
+                    strength_list.append(strength)
+            wandb.log({layer_name+'/modes3_evolution': wandb.Histogram(np.array(strength_list))})
+
+            # visualize gradient
+            weights = self.weights1.grad.data
+            for mode_index in range(self.max_modes):
+                strength = torch.norm(weights[:,:,:,:,mode_index], p='fro').cpu()
+                if mode_index == 0:
+                    strength_list = [strength]
+                else:
+                    strength_list.append(strength)
+            wandb.log({layer_name+'/modes3_grad_evolution': wandb.Histogram(np.array(strength_list))})
             
         # log mode changes
         # print('modes1: {}, modes2: {}, modes3: {}'.format(self.adaptive_modes1, self.adaptive_modes2, self.adaptive_modes3))
