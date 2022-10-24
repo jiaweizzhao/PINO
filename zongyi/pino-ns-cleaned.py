@@ -29,6 +29,9 @@ parser.add_argument('--loss_eps', default=1e-5, type=float)
 # for frequency_norm_abs method
 parser.add_argument('--norm_abs_eps', default=1.0, type=float)
 
+# visualization
+parser.add_argument('--visualize_evolution', action='store_true')
+
 args = parser.parse_args()
 
 wandb.init(project="incremental-fno", entity="jiawei", name=args.name)
@@ -123,7 +126,7 @@ class SpectralConv3d(nn.Module):
             weight_list = [self.weights1] #, self.weights2, self.weights3, self.weights4] #! temp version: onlt use first weight to determine
             for parameters in weight_list:
                 weights = parameters.data
-                # only compute the highest representable frequency mode
+                # method 1: only compute the highest representable frequency mode
                 # first mode direction
                 strength = torch.norm(weights[:,:,self.adaptive_modes1-1,:,:], p='fro') # will be removed in the future, see documetation
                 if strength >= args.norm_abs_eps:
@@ -145,6 +148,19 @@ class SpectralConv3d(nn.Module):
                     if self.adaptive_modes3 < self.max_modes:
                         self.adaptive_modes3 += 1  
                         print('increase mode 3')
+                        
+                # method 2: 
+                
+        if args.visualize_evolution:
+            # visualize evolution for all modes in modes1 in weights1 in each layer
+            weights = self.weights1.data
+            for mode_index in range(self.max_modes):
+                strength = torch.norm(weights[:,:,mode_index,:,:], p='fro').cpu()
+                if mode_index == 0:
+                    strength_list = [strength]
+                else:
+                    strength_list.append(strength)
+            wandb.log({layer_name+'/modes1_evolution': wandb.Histogram(np.array(strength_list))})
     
             
             
