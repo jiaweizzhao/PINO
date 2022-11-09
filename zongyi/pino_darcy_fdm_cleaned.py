@@ -17,6 +17,49 @@ from utilities3 import *
 torch.manual_seed(0)
 np.random.seed(0)
 
+import wandb
+
+import argparse
+parser = argparse.ArgumentParser(description='Incremental PINO')
+
+parser.add_argument('--name', type=str, default='test')
+parser.add_argument('--method', type=str, default='standard')
+parser.add_argument('--max_modes', default=20, type=int)
+parser.add_argument('--init_modes', default=1, type=int)
+
+# for loss gap method
+parser.add_argument('--loss_eps', default=1e-5, type=float)
+
+# for frequency_norm_abs method
+parser.add_argument('--norm_abs_eps', default=1.0, type=float)
+
+# for grad_frequency_explain
+parser.add_argument('--grad_max_iter', default=10, type=int)
+parser.add_argument('--grad_explained_ratio_threshold', default=0.9, type=float)
+parser.add_argument('--buffer', default=5, type=int)
+
+# visualization
+parser.add_argument('--visualize_evolution', action='store_true')
+
+# resolution control
+parser.add_argument('--r_data', default=42, type=int) # 42 - low, r_data = 42 or turn off data loss 
+parser.add_argument('--r_pde', default=7, type=int) # fix r_pde = 7 will work (note: design a max cap for mode increaasing)
+
+args = parser.parse_args()
+
+wandb.init(project="incremental-fno-pino-darcy", entity="research-pino_ifno", name=args.name)
+wandb.config.update(args)
+
+torch.manual_seed(0)
+np.random.seed(0)
+
+activation = F.relu
+
+# tools box
+def compute_explained_variance(frequency_max, s):
+    s_current = s.clone()
+    s_current[frequency_max:] = 0
+    return 1 - torch.var(s - s_current) / torch.var(s)
 
 
 def compl_mul2d(a, b):
@@ -33,12 +76,23 @@ class SpectralConv2d(nn.Module):
         super(SpectralConv2d, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
+        
+        self.max_modes = modes1 # assert modes1 == modes2 == modes3
+        
         self.modes1 = modes1 #Number of Fourier modes to multiply, at most floor(N/2) + 1
         self.modes2 = modes2
 
         self.scale = (1 / (in_channels * out_channels))
         self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, dtype=torch.cfloat))
         self.weights2 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, dtype=torch.cfloat))
+        
+        # reassign the modes
+        if args.method == 'standard':
+            self.adaptive_modes1 = self.modes1 #Number of Fourier modes to multiply, at most floor(N/2) + 1 #? to-do: set a hard limit
+            self.adaptive_modes2 = self.modes2
+        else:
+            self.adaptive_modes1 = args.init_modes 
+            self.adaptive_modes2 = args.init_modes 
 
     def forward(self, x, size=None):
         if size==None:
@@ -47,18 +101,187 @@ class SpectralConv2d(nn.Module):
         batchsize = x.shape[0]
         #Compute Fourier coeffcients up to factor of e^(- something constant)
         x_ft = torch.fft.rfftn(x, dim=[2,3])
+        
 
         # Multiply relevant Fourier modes
         out_ft = torch.zeros(batchsize, self.out_channels, size, size//2 + 1, device=x.device, dtype=torch.cfloat)
-        out_ft[:, :, :self.modes1, :self.modes2] = \
-            compl_mul2d(x_ft[:, :, :self.modes1, :self.modes2], self.weights1)
-        out_ft[:, :, -self.modes1:, :self.modes2] = \
-            compl_mul2d(x_ft[:, :, -self.modes1:, :self.modes2], self.weights2)
+        
+        # checking
+        # print(x_ft.shape)
+        # print(out_ft.shape)
+        # print(self.weights1.shape)
+        # print('after truncating')
+        # print(x_ft[:, :, :self.adaptive_modes1, :self.adaptive_modes2].shape)
+        # print(out_ft[:, :, :self.adaptive_modes1, :self.adaptive_modes2].shape)
+        # print(self.weights1[:, :, :self.adaptive_modes1, :self.adaptive_modes2].shape)
+        
+        out_ft[:, :, :self.adaptive_modes1, :self.adaptive_modes2] = \
+            compl_mul2d(x_ft[:, :, :self.adaptive_modes1, :self.adaptive_modes2], self.weights1[:, :, :self.adaptive_modes1, :self.adaptive_modes2])
+        out_ft[:, :, -self.adaptive_modes1:, :self.adaptive_modes2] = \
+            compl_mul2d(x_ft[:, :, -self.adaptive_modes1:, :self.adaptive_modes2], self.weights2[:, :, :self.adaptive_modes1, :self.adaptive_modes2])
+            
 
 
         #Return to physical space
         x = torch.fft.irfftn(out_ft, s=(size, size), dim=[2,3])
         return x
+    
+    def determine_modes(self, ep, loss, layer_name=None):
+        
+        if args.method == 'standard':
+            self.adaptive_modes1 = self.max_modes
+            self.adaptive_modes2 = self.max_modes
+        elif args.method == 'loss_gap':
+            eps = args.loss_eps
+            # method 1: loss_gap
+            if not hasattr(self, 'loss_list'):
+                self.loss_list = [loss]
+            else:
+                self.loss_list.append(loss)
+            
+            if len(self.loss_list) > 1:
+                if abs(self.loss_list[-1] - self.loss_list[-2]) <= eps:
+                    if self.adaptive_modes1 < self.max_modes:
+                        self.adaptive_modes1 += 1
+                    if self.adaptive_modes2 < self.max_modes:
+                        self.adaptive_modes2 += 1
+                    if self.adaptive_modes3 < self.max_modes:
+                        self.adaptive_modes3 += 1
+        elif args.method == 'frequency_norm_abs':
+            # using the absolute frequency norm at each mode (after weight update) to determine whether to increase
+            
+            # caculate the frequency norm
+            weight_list = [self.weights1] #, self.weights2, self.weights3, self.weights4] #! temp version: onlt use first weight to determine
+            for parameters in weight_list:
+                weights = parameters.data
+                # method 1: only compute the highest representable frequency mode
+                # first mode direction
+                strength = torch.norm(weights[:,:,self.adaptive_modes1-1,:,:], p='fro') # will be removed in the future, see documetation
+                if strength >= args.norm_abs_eps:
+                    if self.adaptive_modes1 < self.max_modes:
+                        self.adaptive_modes1 += 1
+                        print('increase mode 1')
+                
+                # second mode direction
+                strength = torch.norm(weights[:,:,:,self.adaptive_modes2-1,:], p='fro') # will be removed in the future, see documetation
+                if strength >= args.norm_abs_eps:
+                    if self.adaptive_modes2 < self.max_modes:
+                        self.adaptive_modes2 += 1  
+                        print('increase mode 2')
+                        
+
+                # third mode direction
+                strength = torch.norm(weights[:,:,:,:,self.adaptive_modes3-1], p='fro') # will be removed in the future, see documetation
+                if strength >= args.norm_abs_eps:
+                    if self.adaptive_modes3 < self.max_modes:
+                        self.adaptive_modes3 += 1  
+                        print('increase mode 3')
+        
+        elif args.method == 'grad_frequency_explain':                
+            # method 2: explain an averaged gradient distribution more than a threshold given the current modes
+            
+            # average the gradient over a certain period
+            if not hasattr(self, 'accumulated_grad'):
+                self.accumulated_grad = torch.zeros_like(self.weights1.grad.data)
+            if not hasattr(self, 'grad_iter'):
+                self.grad_iter = 1
+            
+            if self.grad_iter <= args.grad_max_iter:
+                self.grad_iter += 1
+                self.accumulated_grad += self.weights1.grad.data
+            
+            # compute and add modes given explained variance
+            else:
+                # for mode 1
+                weights = self.accumulated_grad
+                strength_vector = []
+                for mode_index in range(self.adaptive_modes1):
+                    strength = torch.norm(weights[:,:,mode_index,:,:], p='fro').cpu()
+                    strength_vector.append(strength)
+                expained_ratio = compute_explained_variance(self.adaptive_modes1 - args.buffer, torch.Tensor(strength_vector))
+                wandb.log({layer_name+'/modes1_expained_ratio': expained_ratio})
+                if expained_ratio < args.grad_explained_ratio_threshold:
+                    if self.adaptive_modes1 < self.max_modes:
+                        self.adaptive_modes1 += 1
+                        print('increase mode 1')
+
+                # for mode 2
+                weights = self.accumulated_grad
+                strength_vector = []
+                for mode_index in range(self.adaptive_modes2):
+                    strength = torch.norm(weights[:,:,mode_index,:,:], p='fro').cpu()
+                    strength_vector.append(strength)
+                expained_ratio = compute_explained_variance(self.adaptive_modes2 - args.buffer, torch.Tensor(strength_vector))
+                wandb.log({layer_name+'/modes2_expained_ratio': expained_ratio})
+                if expained_ratio < args.grad_explained_ratio_threshold:
+                    if self.adaptive_modes2 < self.max_modes:
+                        self.adaptive_modes2 += 1
+                        print('increase mode 2')
+                        
+                # for mode 3
+                weights = self.accumulated_grad
+                strength_vector = []
+                for mode_index in range(self.adaptive_modes3):
+                    strength = torch.norm(weights[:,:,mode_index,:,:], p='fro').cpu()
+                    strength_vector.append(strength)
+                expained_ratio = compute_explained_variance(self.adaptive_modes3 - args.buffer, torch.Tensor(strength_vector))
+                wandb.log({layer_name+'/modes3_expained_ratio': expained_ratio})
+                if expained_ratio < args.grad_explained_ratio_threshold:
+                    if self.adaptive_modes3 < self.max_modes:
+                        self.adaptive_modes3 += 1
+                        print('increase mode 3')
+                
+                # reset
+                self.grad_iter = 1
+                self.accumulated_grad = torch.zeros_like(self.weights1.grad.data)
+                
+            
+                
+                
+        if args.visualize_evolution:
+            # visualize evolution for all modes in modes1 in weights1 in each layer
+            weights = self.weights1.data
+            for mode_index in range(self.max_modes):
+                strength = torch.norm(weights[:,:,mode_index,:], p='fro').cpu()
+                if mode_index == 0:
+                    strength_list = [strength]
+                else:
+                    strength_list.append(strength)
+            wandb.log({layer_name+'/modes1_evolution': wandb.Histogram(np.array(strength_list))})
+            
+            # visualize gradient 
+            weights = self.weights1.grad.data
+            for mode_index in range(self.max_modes):
+                strength = torch.norm(weights[:,:,mode_index,:], p='fro').cpu()
+                if mode_index == 0:
+                    strength_list = [strength]
+                else:
+                    strength_list.append(strength)
+            wandb.log({layer_name+'/modes1_grad_evolution': wandb.Histogram(np.array(strength_list))})            
+    
+            # visualize evolution for all modes in modes2 in weights1 in each layer
+            weights = self.weights1.data
+            for mode_index in range(self.max_modes):
+                strength = torch.norm(weights[:,:,:,mode_index], p='fro').cpu()
+                if mode_index == 0:
+                    strength_list = [strength]
+                else:
+                    strength_list.append(strength)
+            wandb.log({layer_name+'/modes2_evolution': wandb.Histogram(np.array(strength_list))})
+            
+            # visualize gradient
+            weights = self.weights1.grad.data
+            for mode_index in range(self.max_modes):
+                strength = torch.norm(weights[:,:,:,mode_index], p='fro').cpu()
+                if mode_index == 0:
+                    strength_list = [strength]
+                else:
+                    strength_list.append(strength)
+            wandb.log({layer_name+'/modes2_grad_evolution': wandb.Histogram(np.array(strength_list))})
+            
+        # log mode changes
+        # print('modes1: {}, modes2: {}, modes3: {}'.format(self.adaptive_modes1, self.adaptive_modes2, self.adaptive_modes3))
+        wandb.log({layer_name+'/modes1': self.adaptive_modes1, layer_name+'/modes2': self.adaptive_modes2, 'epoch': ep})
 
 class FNO2d(nn.Module):
     def __init__(self, modes1, modes2, width):
@@ -153,6 +376,12 @@ class Net2d(nn.Module):
             c += reduce(operator.mul, list(p.size()))
 
         return c
+    
+    def determine_modes(self, ep, loss):
+        self.conv1.conv0.determine_modes(ep, loss, 'conv0')
+        self.conv1.conv1.determine_modes(ep, loss, 'conv1')
+        self.conv1.conv2.determine_modes(ep, loss, 'conv2')
+        self.conv1.conv3.determine_modes(ep, loss, 'conv3')
 
 Finetune = False
 
@@ -168,8 +397,8 @@ ntest = 200
 
 batch_size = 20
 learning_rate = 0.001
-epochs = 200
-step_size = 50
+epochs = 500 #200 
+step_size = 100 #50
 gamma = 0.5
 
 if Finetune:
@@ -189,9 +418,9 @@ r = 1
 h = int(((421 - 1)/r) + 1)
 s = h
 
-r_data = 7
+r_data = args.r_data
 s_data = int(((421 - 1)/r_data) + 1)
-r_pde = 2
+r_pde = args.r_pde
 s_pde = int(((421 - 1)/r_pde) + 1)
 print(s)
 
@@ -241,7 +470,7 @@ x_test = x_test.reshape(ntest, s, s, 1)
 train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True)
 test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False)
 
-model = Net2d(modes, width).cuda()
+model = Net2d(args.max_modes, width).cuda()
 # model = torch.load('/home/wumming/Documents/GNN-PDE/graph-pde/model/PINO_FDM_darcy_pde_N1000_ep500_m20_w64').cuda()
 num_param = model.count_params()
 print(num_param)
@@ -352,7 +581,7 @@ for ep in range(epochs):
         out_pde = out_pde * mollifier_pde
 
         loss_f, loss_u = PINO_loss(out_pde, a)
-        pino_loss = 1*loss_f + 1.*loss
+        pino_loss = 1*loss_f + 1.*loss #! place to turn off data loss
         pino_loss.backward()
         # loss.backward()
 
@@ -397,6 +626,9 @@ for ep in range(epochs):
     t2 = default_timer()
     print(ep, t2-t1, train_f, train_l2, test_pino, test_l2)
     # print(train_loss)
+    wandb.log({'train_f': train_f, 'train_l2': train_l2, 'test_pino': test_pino, 'test_l2': test_l2, 'epoch': ep})
+    
+    model.determine_modes(ep, train_l2)
 
 torch.save(model, path_model)
 

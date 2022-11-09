@@ -468,7 +468,7 @@ print(epochs, learning_rate, scheduler_step, scheduler_gamma)
 
 index = 0
 sub_test = 4
-ns = 256 // sub_test
+ns = 256 // sub_test #! different sub_test and sub_eval differently, along with eval_a, eval_u
 # nt = 64
 T_pad = 11
 T_interval = 0.5
